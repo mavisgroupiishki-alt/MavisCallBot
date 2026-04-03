@@ -473,7 +473,7 @@ if __name__ == "__main__":
     if mode == "poll":
         poll()
     elif mode == "report":
-       date_arg = sys.argv[2] if len(sys.argv) > 2 else None
+        date_arg = sys.argv[2] if len(sys.argv) > 2 else None
         if date_arg and "." in date_arg:
             parts = date_arg.split(".")
             date_arg = f"{parts[2]}-{parts[1]}-{parts[0]}"
