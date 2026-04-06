@@ -24,7 +24,7 @@ GROUP_CHAT_ID = os.environ["GROUP_CHAT_ID"]
 REPORT_CHAT_ID = os.environ.get("REPORT_CHAT_ID") or "1112419667"
 BITRIX_WEBHOOK = os.environ.get(
     "BITRIX_WEBHOOK",
-    "https://mavisgroup.bitrix24.by/rest/2110/zqktovce9c6mxxon/"
+    "https://mavisgroup.bitrix24.by/rest/2110/crxrgmh6653tjopg/"
 )
 
 TG_API = f"https://api.telegram.org/bot{BOT_TOKEN}"
