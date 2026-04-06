@@ -33,6 +33,7 @@ jobs:
           BOT_TOKEN: ${{ secrets.BOT_TOKEN }}
           GROUP_CHAT_ID: ${{ secrets.GROUP_CHAT_ID }}
           BITRIX_WEBHOOK: ${{ secrets.BITRIX_WEBHOOK }}
+          REPORT_CHAT_ID: ${{ secrets.REPORT_CHAT_ID }}
 
       # Сохраняем обновлённый state (после очистки старых записей)
       - uses: actions/cache/save@v4
