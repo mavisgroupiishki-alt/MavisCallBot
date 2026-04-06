@@ -19,7 +19,7 @@ from collections import defaultdict
 from pathlib import Path
 
 # ── Настройки (из GitHub Secrets → env) ──────────────────────
-BOT_TOKEN = os.environ["BOT_TOKEN"]
+BOT_TOKEN = os.environ["BOT_TOKEN"].strip()
 GROUP_CHAT_ID = os.environ["GROUP_CHAT_ID"]
 REPORT_CHAT_ID = os.environ.get("REPORT_CHAT_ID") or "1112419667"
 BITRIX_WEBHOOK = os.environ.get(
