@@ -21,6 +21,7 @@ from pathlib import Path
 # ── Настройки (из GitHub Secrets → env) ──────────────────────
 BOT_TOKEN = os.environ["BOT_TOKEN"]
 GROUP_CHAT_ID = os.environ["GROUP_CHAT_ID"]
+REPORT_CHAT_ID = os.environ.get("REPORT_CHAT_ID", GROUP_CHAT_ID)
 BITRIX_WEBHOOK = os.environ.get(
     "BITRIX_WEBHOOK",
     "https://mavisgroup.bitrix24.by/rest/2110/zqktovce9c6mxxon/"
@@ -443,7 +444,7 @@ def report(target_date: str = None):
             L.append(f"{r['phone']} | {_short(r['manager'])} | {r['company']}")
 
     text = "\n".join(L)
-    send_message(GROUP_CHAT_ID, text)
+    send_message(REPORT_CHAT_ID, text)
     print(f"Отчёт отправлен ({len(text)} символов).")
 
     # ── Очистка старых записей (старше 7 дней) ───────────────
