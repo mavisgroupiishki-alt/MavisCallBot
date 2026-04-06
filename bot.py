@@ -64,11 +64,12 @@ def get_updates(offset: int = 0) -> list:
 
 
 def send_message(chat_id, text: str, reply_to: int = None):
-    """Отправить сообщение в чат."""
     params = {"chat_id": chat_id, "text": text}
     if reply_to:
         params["reply_to_message_id"] = reply_to
-    return tg("sendMessage", **params)
+    result = tg("sendMessage", **params)
+    print(f"[TG SEND] chat_id={chat_id} ok={result.get('ok')} error={result.get('description','')}")
+    return result
 
 
 # ══════════════════════════════════════════════════════════════
