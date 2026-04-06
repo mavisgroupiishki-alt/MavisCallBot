@@ -2,12 +2,16 @@ name: Daily Report
 
 on:
   schedule:
-    - cron: '0 6 * * *'      # 6:00 UTC = 9:00 по Минску
-  workflow_dispatch:           # ручной запуск
+    - cron: '0 6 * * *'
+  workflow_dispatch:
     inputs:
       date:
-        description: 'Дата отчёта (YYYY-MM-DD), пусто = вчера'
+        description: 'Дата (YYYY-MM-DD), пусто = вчера'
         required: false
+      mode:
+        description: 'Режим: report (из чата) или bitrix-report (из Bitrix24)'
+        required: false
+        default: 'report'
 
 jobs:
   report:
@@ -21,21 +25,19 @@ jobs:
 
       - run: pip install requests
 
-      # Восстанавливаем state.json
       - uses: actions/cache/restore@v4
         with:
           path: state.json
           key: bot-state-dummy
           restore-keys: bot-state-
 
-      - run: python bot.py report ${{ github.event.inputs.date }}
+      - run: python bot.py ${{ github.event.inputs.mode || 'report' }} ${{ github.event.inputs.date }}
         env:
           BOT_TOKEN: ${{ secrets.BOT_TOKEN }}
           GROUP_CHAT_ID: ${{ secrets.GROUP_CHAT_ID }}
           BITRIX_WEBHOOK: ${{ secrets.BITRIX_WEBHOOK }}
           REPORT_CHAT_ID: ${{ secrets.REPORT_CHAT_ID }}
 
-      # Сохраняем обновлённый state (после очистки старых записей)
       - uses: actions/cache/save@v4
         if: always()
         with:
