@@ -461,12 +461,232 @@ def report(target_date: str = None):
 
 
 # ══════════════════════════════════════════════════════════════
+#  BITRIX-REPORT — отчёт целиком из Bitrix24 (для прошлых дат)
+# ══════════════════════════════════════════════════════════════
+
+def bitrix_report(target_date: str = None):
+    """
+    Генерирует отчёт полностью из Bitrix24 API, без данных из чата.
+    Полезно для прошлых дат, когда бот ещё не был в группе.
+    """
+    if target_date is None:
+        target_date = (datetime.now() - timedelta(days=1)).strftime("%Y-%m-%d")
+
+    target_dt = datetime.strptime(target_date, "%Y-%m-%d").date()
+    display_date = target_dt.strftime("%d.%m.%Y")
+
+    # Забираем все звонки из Bitrix24
+    all_calls = []
+    try:
+        all_calls = get_bitrix_calls(target_date)
+        print(f"Bitrix24: {len(all_calls)} звонков за {target_date}")
+    except Exception as e:
+        print(f"Bitrix24 ошибка: {e}")
+        send_message(REPORT_CHAT_ID, f"❌ Ошибка Bitrix24: {e}")
+        return
+
+    if not all_calls:
+        send_message(
+            REPORT_CHAT_ID,
+            f"📊 Пропущенные — {display_date}\n\nПропущенных: 0 ✅\nОтличная работа! 🎉",
+        )
+        return
+
+    # ── Находим пропущенные (входящие с duration=0) ──────────
+    missed = []
+    for c in all_calls:
+        call_type = int(c.get("CALL_TYPE", 0))
+        duration = int(c.get("CALL_DURATION", 0))
+        # Входящий (2, 3) с нулевой длительностью = пропущенный
+        if call_type in (2, 3) and duration == 0:
+            phone = normalize_phone(c.get("PHONE_NUMBER", ""))
+            raw_time = c.get("CALL_START_DATE", "")
+            try:
+                call_time = datetime.strptime(raw_time[:19], "%Y-%m-%dT%H:%M:%S")
+            except ValueError:
+                try:
+                    call_time = datetime.strptime(raw_time[:19], "%Y-%m-%d %H:%M:%S")
+                except ValueError:
+                    continue
+
+            # Получаем имя менеджера по PORTAL_USER_ID
+            user_id = c.get("PORTAL_USER_ID", "")
+            manager_name = get_bitrix_user_name(user_id) if user_id else "Не указан"
+
+            # Получаем компанию по номеру телефона
+            company = get_company_by_phone(phone)
+
+            missed.append({
+                "phone": phone,
+                "call_time": call_time.strftime("%Y-%m-%d %H:%M:%S"),
+                "manager": manager_name,
+                "company": company,
+                "crm_callback": False,
+                "crm_time": None,
+                "client_back": False,
+                "client_time": None,
+            })
+
+    print(f"Пропущенных: {len(missed)}")
+
+    if not missed:
+        send_message(
+            REPORT_CHAT_ID,
+            f"📊 Пропущенные — {display_date}\n\nПропущенных: 0 ✅\nОтличная работа! 🎉",
+        )
+        return
+
+    # ── Ищем перезвоны ───────────────────────────────────────
+    for mc in missed:
+        mc_phone = mc["phone"]
+        mc_time = datetime.strptime(mc["call_time"], "%Y-%m-%d %H:%M:%S")
+
+        for bc in all_calls:
+            bc_phone = normalize_phone(bc.get("PHONE_NUMBER", ""))
+            if bc_phone != mc_phone:
+                continue
+
+            raw_time = bc.get("CALL_START_DATE", "")
+            try:
+                bc_time = datetime.strptime(raw_time[:19], "%Y-%m-%dT%H:%M:%S")
+            except ValueError:
+                try:
+                    bc_time = datetime.strptime(raw_time[:19], "%Y-%m-%d %H:%M:%S")
+                except ValueError:
+                    continue
+
+            if bc_time <= mc_time:
+                continue
+
+            call_type = int(bc.get("CALL_TYPE", 0))
+            duration = int(bc.get("CALL_DURATION", 0))
+
+            # Исходящий (менеджер перезвонил)
+            if call_type == 1 and duration > 0 and not mc["crm_callback"]:
+                mc["crm_callback"] = True
+                mc["crm_time"] = bc_time.strftime("%Y-%m-%d %H:%M:%S")
+                break
+
+            # Входящий (клиент перезвонил сам)
+            if call_type in (2, 3) and duration > 0 and not mc["client_back"]:
+                mc["client_back"] = True
+                mc["client_time"] = bc_time.strftime("%Y-%m-%d %H:%M:%S")
+
+    # ── Подсчёты ─────────────────────────────────────────────
+    total = len(missed)
+    crm = [r for r in missed if r["crm_callback"]]
+    not_done = [r for r in missed if not r["crm_callback"] and not r["client_back"]]
+    client_back = [r for r in missed if r["client_back"] and not r["crm_callback"]]
+    total_mgr = len(crm)
+
+    # Среднее время: менеджер
+    mgr_d = []
+    for r in crm:
+        try:
+            t1 = datetime.strptime(r["call_time"], "%Y-%m-%d %H:%M:%S")
+            t2 = datetime.strptime(r["crm_time"], "%Y-%m-%d %H:%M:%S")
+            d = (t2 - t1).total_seconds()
+            if d > 0: mgr_d.append(d)
+        except (ValueError, TypeError):
+            pass
+    avg_mgr = _fmt(sum(mgr_d) / len(mgr_d)) if mgr_d else "—"
+
+    # Среднее время: клиент
+    cli_d = []
+    for r in client_back:
+        try:
+            t1 = datetime.strptime(r["call_time"], "%Y-%m-%d %H:%M:%S")
+            t2 = datetime.strptime(r["client_time"], "%Y-%m-%d %H:%M:%S")
+            d = (t2 - t1).total_seconds()
+            if d > 0: cli_d.append(d)
+        except (ValueError, TypeError):
+            pass
+    avg_cli = _fmt(sum(cli_d) / len(cli_d)) if cli_d else "—"
+
+    # По менеджерам
+    ms = defaultdict(lambda: {"total": 0, "crm": 0, "bad": 0})
+    for r in missed:
+        s = ms[r["manager"] or "Не указан"]
+        s["total"] += 1
+        if r["crm_callback"]:
+            s["crm"] += 1
+        elif not r["client_back"]:
+            s["bad"] += 1
+
+    # ── Текст ────────────────────────────────────────────────
+    pct = round(total_mgr / total * 100) if total else 0
+    L = []
+    L.append(f"📊 Пропущенные — {display_date} (из Bitrix24)")
+    L.append("")
+    L.append(f"📞 Всего: {total} | Обработано: {total_mgr} ({pct}%) | Не обработано: {len(not_done)}")
+    L.append(f"⏱ Менеджер перезвонил: {total_mgr} (в среднем за {avg_mgr})")
+    L.append(f"⏱ Клиент перезвонил сам: {len(client_back)} (в среднем через {avg_cli})")
+    L.append("")
+
+    L.append("👥 По менеджерам:")
+    L.append("─" * 30)
+    for name, s in sorted(ms.items(), key=lambda x: -x[1]["total"]):
+        L.append(
+            f"👤 {name} — {s['total']} пропущ.\n"
+            f"   ✅ {s['crm']} обработ. (CRM) | ❌ {s['bad']}"
+        )
+    L.append("")
+
+    if not_done:
+        L.append(f"❌ Не обработано ({len(not_done)}):")
+        L.append("─" * 30)
+        for r in not_done:
+            L.append(f"{r['phone']} | {_short(r['manager'])} | {r['company']}")
+
+    text = "\n".join(L)
+    send_message(REPORT_CHAT_ID, text)
+    print(f"Bitrix-отчёт отправлен ({len(text)} символов).")
+
+
+# Кеш пользователей Bitrix24
+_user_cache = {}
+
+def get_bitrix_user_name(user_id: str) -> str:
+    """Получает имя сотрудника по ID из Bitrix24."""
+    if user_id in _user_cache:
+        return _user_cache[user_id]
+    data = bitrix("user.get", {"ID": user_id})
+    if data and "result" in data and data["result"]:
+        u = data["result"][0]
+        name = f"{u.get('NAME', '')} {u.get('LAST_NAME', '')}".strip()
+        _user_cache[user_id] = name or "Не указан"
+    else:
+        _user_cache[user_id] = "Не указан"
+    return _user_cache[user_id]
+
+
+def get_company_by_phone(phone: str) -> str:
+    """Ищет компанию по номеру телефона в CRM Bitrix24."""
+    if not phone:
+        return ""
+    # Ищем среди контактов
+    data = bitrix("crm.contact.list", {
+        "filter": {"PHONE": phone},
+        "select": ["COMPANY_ID", "NAME", "LAST_NAME"],
+    })
+    if data and data.get("result"):
+        contact = data["result"][0]
+        company_id = contact.get("COMPANY_ID")
+        if company_id:
+            comp = bitrix("crm.company.get", {"ID": company_id})
+            if comp and comp.get("result"):
+                return comp["result"].get("TITLE", "")
+        return f"{contact.get('NAME', '')} {contact.get('LAST_NAME', '')}".strip()
+    return ""
+
+
+# ══════════════════════════════════════════════════════════════
 #  ТОЧКА ВХОДА
 # ══════════════════════════════════════════════════════════════
 
 if __name__ == "__main__":
     if len(sys.argv) < 2:
-        print("Использование: python bot.py poll|report|report YYYY-MM-DD")
+        print("Использование: python bot.py poll|report|bitrix-report YYYY-MM-DD")
         sys.exit(1)
 
     mode = sys.argv[1]
@@ -479,6 +699,12 @@ if __name__ == "__main__":
             parts = date_arg.split(".")
             date_arg = f"{parts[2]}-{parts[1]}-{parts[0]}"
         report(date_arg)
+    elif mode == "bitrix-report":
+        date_arg = sys.argv[2] if len(sys.argv) > 2 else None
+        if date_arg and "." in date_arg:
+            parts = date_arg.split(".")
+            date_arg = f"{parts[2]}-{parts[1]}-{parts[0]}"
+        bitrix_report(date_arg)
     else:
         print(f"Неизвестный режим: {mode}")
         sys.exit(1)
