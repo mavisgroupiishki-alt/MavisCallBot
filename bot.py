@@ -692,6 +692,8 @@ def fetch_companies_for_calls(missed_calls: list, all_calls: list) -> dict:
 
     for phone in unique_phones:
         url = BITRIX_WEBHOOK.rstrip("/") + "/crm.duplicate.findbycomm"
+
+        # Ищем контакт
         try:
             r = requests.post(url, data={
                 "entity_type": "CONTACT",
@@ -703,8 +705,9 @@ def fetch_companies_for_calls(missed_calls: list, all_calls: list) -> dict:
         except Exception:
             data = None
 
-        if data and data.get("result", {}).get("CONTACT"):
-            cid = data["result"]["CONTACT"][0]
+        result = data.get("result") if data and isinstance(data, dict) else None
+        if result and isinstance(result, dict) and result.get("CONTACT"):
+            cid = result["CONTACT"][0]
             c = bitrix("crm.contact.get", {"ID": cid})
             if c and c.get("result"):
                 contact = c["result"]
@@ -731,8 +734,9 @@ def fetch_companies_for_calls(missed_calls: list, all_calls: list) -> dict:
         except Exception:
             data = None
 
-        if data and data.get("result", {}).get("LEAD"):
-            lid = data["result"]["LEAD"][0]
+        result = data.get("result") if data and isinstance(data, dict) else None
+        if result and isinstance(result, dict) and result.get("LEAD"):
+            lid = result["LEAD"][0]
             l = bitrix("crm.lead.get", {"ID": lid})
             if l and l.get("result"):
                 lead = l["result"]
