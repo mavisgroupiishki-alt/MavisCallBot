@@ -290,7 +290,7 @@ def report(target_date: str = None):
     total = len(day_calls)
     if total == 0:
         send_message(
-            GROUP_CHAT_ID,
+            REPORT_CHAT_ID,
             f"📊 Пропущенные — {display_date}\n\nПропущенных: 0 ✅\nОтличная работа! 🎉",
         )
         return
