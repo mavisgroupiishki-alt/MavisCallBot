@@ -19,12 +19,12 @@ from collections import defaultdict
 from pathlib import Path
 
 # ── Настройки (из GitHub Secrets → env) ──────────────────────
-BOT_TOKEN = os.environ["BOT_TOKEN"].strip()
+BOT_TOKEN = os.environ["BOT_TOKEN"]
 GROUP_CHAT_ID = os.environ["GROUP_CHAT_ID"]
-REPORT_CHAT_ID = os.environ.get("REPORT_CHAT_ID") or "1112419667"
+REPORT_CHAT_ID = os.environ.get("REPORT_CHAT_ID", GROUP_CHAT_ID)
 BITRIX_WEBHOOK = os.environ.get(
     "BITRIX_WEBHOOK",
-    "https://mavisgroup.bitrix24.by/rest/2110/crxrgmh6653tjopg/"
+    "https://mavisgroup.bitrix24.by/rest/2110/zqktovce9c6mxxon/"
 )
 
 TG_API = f"https://api.telegram.org/bot{BOT_TOKEN}"
@@ -64,12 +64,11 @@ def get_updates(offset: int = 0) -> list:
 
 
 def send_message(chat_id, text: str, reply_to: int = None):
+    """Отправить сообщение в чат."""
     params = {"chat_id": chat_id, "text": text}
     if reply_to:
         params["reply_to_message_id"] = reply_to
-    result = tg("sendMessage", **params)
-    print(f"[TG SEND] chat_id={chat_id} ok={result.get('ok')} error={result.get('description','')}")
-    return result
+    return tg("sendMessage", **params)
 
 
 # ══════════════════════════════════════════════════════════════
@@ -79,7 +78,7 @@ def send_message(chat_id, text: str, reply_to: int = None):
 def bitrix(method: str, params: dict = None) -> dict | None:
     url = BITRIX_WEBHOOK.rstrip("/") + "/" + method
     try:
-        r = requests.post(url, json=params or {}, timeout=30)
+        r = requests.get(url, params=params or {}, timeout=30)
         r.raise_for_status()
         return r.json()
     except Exception as e:
@@ -290,7 +289,7 @@ def report(target_date: str = None):
     total = len(day_calls)
     if total == 0:
         send_message(
-            REPORT_CHAT_ID,
+            GROUP_CHAT_ID,
             f"📊 Пропущенные — {display_date}\n\nПропущенных: 0 ✅\nОтличная работа! 🎉",
         )
         return
@@ -494,11 +493,15 @@ def bitrix_report(target_date: str = None):
         return
 
     # ── Находим пропущенные (входящие с duration=0) ──────────
-    missed = []
+    # Сначала загружаем все данные пакетно
+    print("Загружаем пользователей...")
+    users = fetch_all_users()
+    
+    # Собираем пропущенные
+    missed_raw = []
     for c in all_calls:
         call_type = int(c.get("CALL_TYPE", 0))
         duration = int(c.get("CALL_DURATION", 0))
-        # Входящий (2, 3) с нулевой длительностью = пропущенный
         if call_type in (2, 3) and duration == 0:
             phone = normalize_phone(c.get("PHONE_NUMBER", ""))
             raw_time = c.get("CALL_START_DATE", "")
@@ -509,33 +512,39 @@ def bitrix_report(target_date: str = None):
                     call_time = datetime.strptime(raw_time[:19], "%Y-%m-%d %H:%M:%S")
                 except ValueError:
                     continue
-
-            # Получаем имя менеджера по PORTAL_USER_ID
-            user_id = c.get("PORTAL_USER_ID", "")
-            manager_name = get_bitrix_user_name(user_id) if user_id else "Не указан"
-
-            # Получаем компанию по номеру телефона
-            company = get_company_by_phone(phone)
-
-            missed.append({
+            user_id = str(c.get("PORTAL_USER_ID", ""))
+            missed_raw.append({
                 "phone": phone,
                 "call_time": call_time.strftime("%Y-%m-%d %H:%M:%S"),
-                "manager": manager_name,
-                "company": company,
-                "crm_callback": False,
-                "crm_time": None,
-                "client_back": False,
-                "client_time": None,
+                "user_id": user_id,
             })
 
-    print(f"Пропущенных: {len(missed)}")
-
-    if not missed:
+    if not missed_raw:
         send_message(
             REPORT_CHAT_ID,
             f"📊 Пропущенные — {display_date}\n\nПропущенных: 0 ✅\nОтличная работа! 🎉",
         )
         return
+
+    # Загружаем компании пакетно
+    print("Загружаем компании...")
+    phone_companies = fetch_companies_for_calls(missed_raw, all_calls)
+
+    # Собираем итоговый список
+    missed = []
+    for m in missed_raw:
+        missed.append({
+            "phone": m["phone"],
+            "call_time": m["call_time"],
+            "manager": users.get(m["user_id"], "Не указан"),
+            "company": phone_companies.get(m["phone"], ""),
+            "crm_callback": False,
+            "crm_time": None,
+            "client_back": False,
+            "client_time": None,
+        })
+
+    print(f"Пропущенных: {len(missed)}")
 
     # ── Ищем перезвоны ───────────────────────────────────────
     for mc in missed:
@@ -633,6 +642,15 @@ def bitrix_report(target_date: str = None):
         )
     L.append("")
 
+    L.append("")
+
+    if client_back:
+        L.append(f"📞 Клиент перезвонил сам ({len(client_back)}):")
+        L.append("─" * 30)
+        for r in client_back:
+            L.append(f"{r['phone']} | {_short(r['manager'])} | {r['company']}")
+        L.append("")
+
     if not_done:
         L.append(f"❌ Не обработано ({len(not_done)}):")
         L.append("─" * 30)
@@ -644,66 +662,108 @@ def bitrix_report(target_date: str = None):
     print(f"Bitrix-отчёт отправлен ({len(text)} символов).")
 
 
-# Кеш пользователей Bitrix24
-_user_cache = {}
+# ══════════════════════════════════════════════════════════════
+#  ПАКЕТНЫЕ ЗАПРОСЫ К BITRIX24 (оптимизация)
+# ══════════════════════════════════════════════════════════════
 
-def get_bitrix_user_name(user_id: str) -> str:
-    """Получает имя сотрудника по ID из Bitrix24."""
-    if user_id in _user_cache:
-        return _user_cache[user_id]
-    data = bitrix("user.get", {"ID": user_id})
-    if data and "result" in data and data["result"]:
-        u = data["result"][0]
+def fetch_all_users() -> dict:
+    """Загружает всех пользователей за один запрос. Возвращает {id: 'Имя Фамилия'}."""
+    users = {}
+    result = bitrix_all("user.get", {})
+    for u in result:
+        uid = str(u.get("ID", ""))
         name = f"{u.get('NAME', '')} {u.get('LAST_NAME', '')}".strip()
-        _user_cache[user_id] = name or "Не указан"
-    else:
-        _user_cache[user_id] = "Не указан"
-    return _user_cache[user_id]
+        users[uid] = name or "Не указан"
+    print(f"  Загружено пользователей: {len(users)}")
+    return users
 
 
-def get_company_by_phone(phone: str) -> str:
-    """Ищет компанию/контакт по номеру телефона через поиск дубликатов."""
-    if not phone:
-        return ""
-    # Способ 1: поиск через дубликаты
-    data = bitrix("crm.duplicate.findbycomm", {
-        "entity_type": "CONTACT",
-        "type": "PHONE",
-        "values": [phone, "+" + phone],
-    })
-    if data and data.get("result", {}).get("CONTACT"):
-        contact_ids = data["result"]["CONTACT"]
-        if contact_ids:
-            c = bitrix("crm.contact.get", {"ID": contact_ids[0]})
-            if c and c.get("result"):
-                contact = c["result"]
-                company_id = contact.get("COMPANY_ID")
-                if company_id:
-                    comp = bitrix("crm.company.get", {"ID": company_id})
-                    if comp and comp.get("result"):
-                        return comp["result"].get("TITLE", "")
-                name = f"{contact.get('NAME', '')} {contact.get('LAST_NAME', '')}".strip()
-                if name:
-                    return name
-    # Способ 2: поиск среди лидов
-    data = bitrix("crm.duplicate.findbycomm", {
-        "entity_type": "LEAD",
-        "type": "PHONE",
-        "values": [phone, "+" + phone],
-    })
-    if data and data.get("result", {}).get("LEAD"):
-        lead_ids = data["result"]["LEAD"]
-        if lead_ids:
-            l = bitrix("crm.lead.get", {"ID": lead_ids[0]})
-            if l and l.get("result"):
-                lead = l["result"]
-                company = lead.get("COMPANY_TITLE", "")
-                if company:
-                    return company
-                name = f"{lead.get('NAME', '')} {lead.get('LAST_NAME', '')}".strip()
-                if name:
-                    return name
-    return ""
+def fetch_companies_for_calls(missed_calls: list, all_calls: list) -> dict:
+    """
+    Находит компании/контакты для пропущенных номеров.
+    Использует CRM_ENTITY_TYPE/CRM_ENTITY_ID из данных звонков.
+    Возвращает {phone: 'Название компании или ФИО'}.
+    """
+    phone_to_company = {}
+
+    # Собираем CRM-привязки из ВСЕХ звонков (не только пропущенных)
+    phone_entities = {}  # phone -> (entity_type, entity_id)
+    for c in all_calls:
+        phone = normalize_phone(c.get("PHONE_NUMBER", ""))
+        entity_type = c.get("CRM_ENTITY_TYPE", "")
+        entity_id = c.get("CRM_ENTITY_ID", "")
+        if phone and entity_type and entity_id and phone not in phone_entities:
+            phone_entities[phone] = (entity_type, entity_id)
+
+    # Собираем уникальные ID контактов и лидов
+    contact_ids = set()
+    lead_ids = set()
+    for phone, (etype, eid) in phone_entities.items():
+        if etype == "CONTACT":
+            contact_ids.add(eid)
+        elif etype == "LEAD":
+            lead_ids.add(eid)
+
+    # Пакетно загружаем контакты
+    contacts = {}
+    if contact_ids:
+        result = bitrix_all("crm.contact.list", {
+            "filter": {"ID": list(contact_ids)},
+            "select": ["ID", "NAME", "LAST_NAME", "COMPANY_ID"],
+        })
+        for c in result:
+            contacts[str(c["ID"])] = c
+        print(f"  Загружено контактов: {len(contacts)}")
+
+    # Пакетно загружаем лиды
+    leads = {}
+    if lead_ids:
+        result = bitrix_all("crm.lead.list", {
+            "filter": {"ID": list(lead_ids)},
+            "select": ["ID", "NAME", "LAST_NAME", "COMPANY_TITLE"],
+        })
+        for l in result:
+            leads[str(l["ID"])] = l
+        print(f"  Загружено лидов: {len(leads)}")
+
+    # Собираем уникальные company_id из контактов
+    company_ids = set()
+    for c in contacts.values():
+        cid = c.get("COMPANY_ID")
+        if cid:
+            company_ids.add(str(cid))
+
+    # Пакетно загружаем компании
+    companies = {}
+    if company_ids:
+        result = bitrix_all("crm.company.list", {
+            "filter": {"ID": list(company_ids)},
+            "select": ["ID", "TITLE"],
+        })
+        for comp in result:
+            companies[str(comp["ID"])] = comp.get("TITLE", "")
+        print(f"  Загружено компаний: {len(companies)}")
+
+    # Собираем результат: phone -> название
+    for phone, (etype, eid) in phone_entities.items():
+        if etype == "CONTACT" and eid in contacts:
+            c = contacts[eid]
+            company_id = str(c.get("COMPANY_ID", ""))
+            if company_id in companies:
+                phone_to_company[phone] = companies[company_id]
+            else:
+                name = f"{c.get('NAME', '')} {c.get('LAST_NAME', '')}".strip()
+                phone_to_company[phone] = name
+        elif etype == "LEAD" and eid in leads:
+            l = leads[eid]
+            company = l.get("COMPANY_TITLE", "")
+            if company:
+                phone_to_company[phone] = company
+            else:
+                name = f"{l.get('NAME', '')} {l.get('LAST_NAME', '')}".strip()
+                phone_to_company[phone] = name
+
+    return phone_to_company
 
 
 # ══════════════════════════════════════════════════════════════
