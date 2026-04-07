@@ -680,90 +680,60 @@ def fetch_all_users() -> dict:
 
 
 def fetch_companies_for_calls(missed_calls: list, all_calls: list) -> dict:
-    """
-    Находит компании/контакты для пропущенных номеров.
-    Использует CRM_ENTITY_TYPE/CRM_ENTITY_ID из данных звонков.
-    Возвращает {phone: 'Название компании или ФИО'}.
-    """
+    """Находит компании/контакты по номерам телефонов."""
     phone_to_company = {}
 
-    # Собираем CRM-привязки из ВСЕХ звонков (не только пропущенных)
-    phone_entities = {}  # phone -> (entity_type, entity_id)
-    for c in all_calls:
-        phone = normalize_phone(c.get("PHONE_NUMBER", ""))
-        entity_type = c.get("CRM_ENTITY_TYPE", "")
-        entity_id = c.get("CRM_ENTITY_ID", "")
-        if phone and entity_type and entity_id and phone not in phone_entities:
-            phone_entities[phone] = (entity_type, entity_id)
+    # Собираем уникальные номера
+    unique_phones = set()
+    for m in missed_calls:
+        if m.get("phone"):
+            unique_phones.add(m["phone"])
 
-    # Собираем уникальные ID контактов и лидов
-    contact_ids = set()
-    lead_ids = set()
-    for phone, (etype, eid) in phone_entities.items():
-        if etype == "CONTACT":
-            contact_ids.add(eid)
-        elif etype == "LEAD":
-            lead_ids.add(eid)
+    print(f"  Уникальных номеров для поиска: {len(unique_phones)}")
 
-    # Пакетно загружаем контакты
-    contacts = {}
-    if contact_ids:
-        result = bitrix_all("crm.contact.list", {
-            "filter": {"ID": list(contact_ids)},
-            "select": ["ID", "NAME", "LAST_NAME", "COMPANY_ID"],
+    for phone in unique_phones:
+        # Ищем контакт
+        data = bitrix("crm.duplicate.findbycomm", {
+            "entity_type": "CONTACT",
+            "type": "PHONE",
+            "values": [phone, "+" + phone],
         })
-        for c in result:
-            contacts[str(c["ID"])] = c
-        print(f"  Загружено контактов: {len(contacts)}")
+        if data and data.get("result", {}).get("CONTACT"):
+            contact_ids = data["result"]["CONTACT"]
+            c = bitrix("crm.contact.get", {"ID": contact_ids[0]})
+            if c and c.get("result"):
+                contact = c["result"]
+                company_id = contact.get("COMPANY_ID")
+                if company_id:
+                    comp = bitrix("crm.company.get", {"ID": company_id})
+                    if comp and comp.get("result"):
+                        phone_to_company[phone] = comp["result"].get("TITLE", "")
+                        continue
+                name = f"{contact.get('NAME', '')} {contact.get('LAST_NAME', '')}".strip()
+                if name:
+                    phone_to_company[phone] = name
+                    continue
 
-    # Пакетно загружаем лиды
-    leads = {}
-    if lead_ids:
-        result = bitrix_all("crm.lead.list", {
-            "filter": {"ID": list(lead_ids)},
-            "select": ["ID", "NAME", "LAST_NAME", "COMPANY_TITLE"],
+        # Ищем лид
+        data = bitrix("crm.duplicate.findbycomm", {
+            "entity_type": "LEAD",
+            "type": "PHONE",
+            "values": [phone, "+" + phone],
         })
-        for l in result:
-            leads[str(l["ID"])] = l
-        print(f"  Загружено лидов: {len(leads)}")
+        if data and data.get("result", {}).get("LEAD"):
+            lead_ids = data["result"]["LEAD"]
+            l = bitrix("crm.lead.get", {"ID": lead_ids[0]})
+            if l and l.get("result"):
+                lead = l["result"]
+                company = lead.get("COMPANY_TITLE", "")
+                if company:
+                    phone_to_company[phone] = company
+                    continue
+                name = f"{lead.get('NAME', '')} {lead.get('LAST_NAME', '')}".strip()
+                if name:
+                    phone_to_company[phone] = name
 
-    # Собираем уникальные company_id из контактов
-    company_ids = set()
-    for c in contacts.values():
-        cid = c.get("COMPANY_ID")
-        if cid:
-            company_ids.add(str(cid))
-
-    # Пакетно загружаем компании
-    companies = {}
-    if company_ids:
-        result = bitrix_all("crm.company.list", {
-            "filter": {"ID": list(company_ids)},
-            "select": ["ID", "TITLE"],
-        })
-        for comp in result:
-            companies[str(comp["ID"])] = comp.get("TITLE", "")
-        print(f"  Загружено компаний: {len(companies)}")
-
-    # Собираем результат: phone -> название
-    for phone, (etype, eid) in phone_entities.items():
-        if etype == "CONTACT" and eid in contacts:
-            c = contacts[eid]
-            company_id = str(c.get("COMPANY_ID", ""))
-            if company_id in companies:
-                phone_to_company[phone] = companies[company_id]
-            else:
-                name = f"{c.get('NAME', '')} {c.get('LAST_NAME', '')}".strip()
-                phone_to_company[phone] = name
-        elif etype == "LEAD" and eid in leads:
-            l = leads[eid]
-            company = l.get("COMPANY_TITLE", "")
-            if company:
-                phone_to_company[phone] = company
-            else:
-                name = f"{l.get('NAME', '')} {l.get('LAST_NAME', '')}".strip()
-                phone_to_company[phone] = name
-
+    print(f"  Найдено компаний/контактов: {len(phone_to_company)}")
     return phone_to_company
 
 
