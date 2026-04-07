@@ -79,7 +79,7 @@ def send_message(chat_id, text: str, reply_to: int = None):
 def bitrix(method: str, params: dict = None) -> dict | None:
     url = BITRIX_WEBHOOK.rstrip("/") + "/" + method
     try:
-        r = requests.get(url, params=params or {}, timeout=30)
+        r = requests.post(url, json=params or {}, timeout=30)
         r.raise_for_status()
         return r.json()
     except Exception as e:
