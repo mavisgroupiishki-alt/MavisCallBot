@@ -683,7 +683,6 @@ def fetch_companies_for_calls(missed_calls: list, all_calls: list) -> dict:
     """Находит компании/контакты по номерам телефонов."""
     phone_to_company = {}
 
-    # Собираем уникальные номера
     unique_phones = set()
     for m in missed_calls:
         if m.get("phone"):
@@ -692,20 +691,26 @@ def fetch_companies_for_calls(missed_calls: list, all_calls: list) -> dict:
     print(f"  Уникальных номеров для поиска: {len(unique_phones)}")
 
     for phone in unique_phones:
-        # Ищем контакт
-        data = bitrix("crm.duplicate.findbycomm", {
-            "entity_type": "CONTACT",
-            "type": "PHONE",
-            "values": [phone, "+" + phone],
-        })
+        url = BITRIX_WEBHOOK.rstrip("/") + "/crm.duplicate.findbycomm"
+        try:
+            r = requests.post(url, data={
+                "entity_type": "CONTACT",
+                "type": "PHONE",
+                "values[0]": phone,
+                "values[1]": "+" + phone,
+            }, timeout=30)
+            data = r.json() if r.status_code == 200 else None
+        except Exception:
+            data = None
+
         if data and data.get("result", {}).get("CONTACT"):
-            contact_ids = data["result"]["CONTACT"]
-            c = bitrix("crm.contact.get", {"ID": contact_ids[0]})
+            cid = data["result"]["CONTACT"][0]
+            c = bitrix("crm.contact.get", {"ID": cid})
             if c and c.get("result"):
                 contact = c["result"]
-                company_id = contact.get("COMPANY_ID")
-                if company_id:
-                    comp = bitrix("crm.company.get", {"ID": company_id})
+                comp_id = contact.get("COMPANY_ID")
+                if comp_id:
+                    comp = bitrix("crm.company.get", {"ID": comp_id})
                     if comp and comp.get("result"):
                         phone_to_company[phone] = comp["result"].get("TITLE", "")
                         continue
@@ -715,14 +720,20 @@ def fetch_companies_for_calls(missed_calls: list, all_calls: list) -> dict:
                     continue
 
         # Ищем лид
-        data = bitrix("crm.duplicate.findbycomm", {
-            "entity_type": "LEAD",
-            "type": "PHONE",
-            "values": [phone, "+" + phone],
-        })
+        try:
+            r = requests.post(url, data={
+                "entity_type": "LEAD",
+                "type": "PHONE",
+                "values[0]": phone,
+                "values[1]": "+" + phone,
+            }, timeout=30)
+            data = r.json() if r.status_code == 200 else None
+        except Exception:
+            data = None
+
         if data and data.get("result", {}).get("LEAD"):
-            lead_ids = data["result"]["LEAD"]
-            l = bitrix("crm.lead.get", {"ID": lead_ids[0]})
+            lid = data["result"]["LEAD"][0]
+            l = bitrix("crm.lead.get", {"ID": lid})
             if l and l.get("result"):
                 lead = l["result"]
                 company = lead.get("COMPANY_TITLE", "")
