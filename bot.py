@@ -662,22 +662,47 @@ def get_bitrix_user_name(user_id: str) -> str:
 
 
 def get_company_by_phone(phone: str) -> str:
-    """Ищет компанию по номеру телефона в CRM Bitrix24."""
+    """Ищет компанию/контакт по номеру телефона через поиск дубликатов."""
     if not phone:
         return ""
-    # Ищем среди контактов
-    data = bitrix("crm.contact.list", {
-        "filter": {"PHONE": phone},
-        "select": ["COMPANY_ID", "NAME", "LAST_NAME"],
+    # Способ 1: поиск через дубликаты
+    data = bitrix("crm.duplicate.findbycomm", {
+        "entity_type": "CONTACT",
+        "type": "PHONE",
+        "values": [phone, "+" + phone],
     })
-    if data and data.get("result"):
-        contact = data["result"][0]
-        company_id = contact.get("COMPANY_ID")
-        if company_id:
-            comp = bitrix("crm.company.get", {"ID": company_id})
-            if comp and comp.get("result"):
-                return comp["result"].get("TITLE", "")
-        return f"{contact.get('NAME', '')} {contact.get('LAST_NAME', '')}".strip()
+    if data and data.get("result", {}).get("CONTACT"):
+        contact_ids = data["result"]["CONTACT"]
+        if contact_ids:
+            c = bitrix("crm.contact.get", {"ID": contact_ids[0]})
+            if c and c.get("result"):
+                contact = c["result"]
+                company_id = contact.get("COMPANY_ID")
+                if company_id:
+                    comp = bitrix("crm.company.get", {"ID": company_id})
+                    if comp and comp.get("result"):
+                        return comp["result"].get("TITLE", "")
+                name = f"{contact.get('NAME', '')} {contact.get('LAST_NAME', '')}".strip()
+                if name:
+                    return name
+    # Способ 2: поиск среди лидов
+    data = bitrix("crm.duplicate.findbycomm", {
+        "entity_type": "LEAD",
+        "type": "PHONE",
+        "values": [phone, "+" + phone],
+    })
+    if data and data.get("result", {}).get("LEAD"):
+        lead_ids = data["result"]["LEAD"]
+        if lead_ids:
+            l = bitrix("crm.lead.get", {"ID": lead_ids[0]})
+            if l and l.get("result"):
+                lead = l["result"]
+                company = lead.get("COMPANY_TITLE", "")
+                if company:
+                    return company
+                name = f"{lead.get('NAME', '')} {lead.get('LAST_NAME', '')}".strip()
+                if name:
+                    return name
     return ""
 
 
