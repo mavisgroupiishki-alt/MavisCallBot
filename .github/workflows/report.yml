@@ -31,7 +31,7 @@ jobs:
           key: bot-state-dummy
           restore-keys: bot-state-
 
-      - run: python bot.py ${{ github.event.inputs.mode || 'report' }} ${{ github.event.inputs.date }}
+      - run: python bot.py ${{ github.event.inputs.mode || 'bitrix-report' }} ${{ github.event.inputs.date }}
         env:
           BOT_TOKEN: ${{ secrets.BOT_TOKEN }}
           GROUP_CHAT_ID: ${{ secrets.GROUP_CHAT_ID }}
