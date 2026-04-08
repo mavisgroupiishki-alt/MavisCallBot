@@ -19,9 +19,9 @@ from collections import defaultdict
 from pathlib import Path
 
 # ── Настройки (из GitHub Secrets → env) ──────────────────────
-BOT_TOKEN = "8771665068:AAEFWQUF0Wrojh6HUhWwhzRG2Ae01csSm-Q"
+BOT_TOKEN = os.environ["BOT_TOKEN"]
 GROUP_CHAT_ID = os.environ["GROUP_CHAT_ID"]
-REPORT_CHAT_ID = "1112419667"
+REPORT_CHAT_ID = os.environ.get("REPORT_CHAT_ID", GROUP_CHAT_ID)
 BITRIX_WEBHOOK = os.environ.get(
     "BITRIX_WEBHOOK",
     "https://mavisgroup.bitrix24.by/rest/2110/zqktovce9c6mxxon/"
@@ -64,12 +64,11 @@ def get_updates(offset: int = 0) -> list:
 
 
 def send_message(chat_id, text: str, reply_to: int = None):
+    """Отправить сообщение в чат."""
     params = {"chat_id": chat_id, "text": text}
     if reply_to:
         params["reply_to_message_id"] = reply_to
-    result = tg("sendMessage", **params)
-    print(f"[TG SEND] chat_id={chat_id} ok={result.get('ok')} error={result.get('description','')}")
-    return result
+    return tg("sendMessage", **params)
 
 
 # ══════════════════════════════════════════════════════════════
@@ -493,7 +492,10 @@ def bitrix_report(target_date: str = None):
         )
         return
 
-    # ── Находим пропущенные (входящие с duration=0) ──────────
+    # ── Находим пропущенные ─────────────────────────────────────
+    # Пропущенный = входящий (type 2,3) где:
+    #   - duration=0 (не ответили), ИЛИ
+    #   - CALL_FAILED_CODE = 304 (нет ответа) / 603 (отклонён)
     # Сначала загружаем все данные пакетно
     print("Загружаем пользователей...")
     users = fetch_all_users()
@@ -503,22 +505,36 @@ def bitrix_report(target_date: str = None):
     for c in all_calls:
         call_type = int(c.get("CALL_TYPE", 0))
         duration = int(c.get("CALL_DURATION", 0))
-        if call_type in (2, 3) and duration == 0:
-            phone = normalize_phone(c.get("PHONE_NUMBER", ""))
-            raw_time = c.get("CALL_START_DATE", "")
+        failed_code = str(c.get("CALL_FAILED_CODE", ""))
+        
+        # Входящий звонок
+        if call_type not in (2, 3):
+            continue
+        
+        # Пропущенный: duration=0 ИЛИ код ошибки указывает на пропущенный
+        is_missed = (
+            duration == 0
+            or failed_code in ("304", "603", "486", "480", "487")
+        )
+        
+        if not is_missed:
+            continue
+            
+        phone = normalize_phone(c.get("PHONE_NUMBER", ""))
+        raw_time = c.get("CALL_START_DATE", "")
+        try:
+            call_time = datetime.strptime(raw_time[:19], "%Y-%m-%dT%H:%M:%S")
+        except ValueError:
             try:
-                call_time = datetime.strptime(raw_time[:19], "%Y-%m-%dT%H:%M:%S")
+                call_time = datetime.strptime(raw_time[:19], "%Y-%m-%d %H:%M:%S")
             except ValueError:
-                try:
-                    call_time = datetime.strptime(raw_time[:19], "%Y-%m-%d %H:%M:%S")
-                except ValueError:
-                    continue
-            user_id = str(c.get("PORTAL_USER_ID", ""))
-            missed_raw.append({
-                "phone": phone,
-                "call_time": call_time.strftime("%Y-%m-%d %H:%M:%S"),
-                "user_id": user_id,
-            })
+                continue
+        user_id = str(c.get("PORTAL_USER_ID", ""))
+        missed_raw.append({
+            "phone": phone,
+            "call_time": call_time.strftime("%Y-%m-%d %H:%M:%S"),
+            "user_id": user_id,
+        })
 
     if not missed_raw:
         send_message(
@@ -584,11 +600,13 @@ def bitrix_report(target_date: str = None):
                 mc["client_time"] = bc_time.strftime("%Y-%m-%d %H:%M:%S")
 
     # ── Подсчёты ─────────────────────────────────────────────
+    # Обработано = менеджер перезвонил (CRM) ИЛИ клиент перезвонил сам и менеджер поднял
+    # Не обработано = никто не перезвонил
     total = len(missed)
     crm = [r for r in missed if r["crm_callback"]]
-    not_done = [r for r in missed if not r["crm_callback"] and not r["client_back"]]
     client_back = [r for r in missed if r["client_back"] and not r["crm_callback"]]
-    total_mgr = len(crm)
+    not_done = [r for r in missed if not r["crm_callback"] and not r["client_back"]]
+    total_processed = len(crm) + len(client_back)
 
     # Среднее время: менеджер
     mgr_d = []
@@ -625,12 +643,12 @@ def bitrix_report(target_date: str = None):
             s["bad"] += 1
 
     # ── Текст ────────────────────────────────────────────────
-    pct = round(total_mgr / total * 100) if total else 0
+    pct = round(total_processed / total * 100) if total else 0
     L = []
     L.append(f"📊 Пропущенные — {display_date} (из Bitrix24)")
     L.append("")
-    L.append(f"📞 Всего: {total} | Обработано: {total_mgr} ({pct}%) | Не обработано: {len(not_done)}")
-    L.append(f"⏱ Менеджер перезвонил: {total_mgr} (в среднем за {avg_mgr})")
+    L.append(f"📞 Всего: {total} | Обработано: {total_processed} ({pct}%) | Не обработано: {len(not_done)}")
+    L.append(f"⏱ Менеджер перезвонил: {len(crm)} (в среднем за {avg_mgr})")
     L.append(f"⏱ Клиент перезвонил сам: {len(client_back)} (в среднем через {avg_cli})")
     L.append("")
 
@@ -680,75 +698,90 @@ def fetch_all_users() -> dict:
 
 
 def fetch_companies_for_calls(missed_calls: list, all_calls: list) -> dict:
-    """Находит компании/контакты по номерам телефонов."""
+    """
+    Находит компании/контакты для пропущенных номеров.
+    Использует CRM_ENTITY_TYPE/CRM_ENTITY_ID из данных звонков.
+    Возвращает {phone: 'Название компании или ФИО'}.
+    """
     phone_to_company = {}
 
-    unique_phones = set()
-    for m in missed_calls:
-        if m.get("phone"):
-            unique_phones.add(m["phone"])
+    # Собираем CRM-привязки из ВСЕХ звонков (не только пропущенных)
+    phone_entities = {}  # phone -> (entity_type, entity_id)
+    for c in all_calls:
+        phone = normalize_phone(c.get("PHONE_NUMBER", ""))
+        entity_type = c.get("CRM_ENTITY_TYPE", "")
+        entity_id = c.get("CRM_ENTITY_ID", "")
+        if phone and entity_type and entity_id and phone not in phone_entities:
+            phone_entities[phone] = (entity_type, entity_id)
 
-    print(f"  Уникальных номеров для поиска: {len(unique_phones)}")
+    # Собираем уникальные ID контактов и лидов
+    contact_ids = set()
+    lead_ids = set()
+    for phone, (etype, eid) in phone_entities.items():
+        if etype == "CONTACT":
+            contact_ids.add(eid)
+        elif etype == "LEAD":
+            lead_ids.add(eid)
 
-    for phone in unique_phones:
-        url = BITRIX_WEBHOOK.rstrip("/") + "/crm.duplicate.findbycomm"
+    # Пакетно загружаем контакты
+    contacts = {}
+    if contact_ids:
+        result = bitrix_all("crm.contact.list", {
+            "filter": {"ID": list(contact_ids)},
+            "select": ["ID", "NAME", "LAST_NAME", "COMPANY_ID"],
+        })
+        for c in result:
+            contacts[str(c["ID"])] = c
+        print(f"  Загружено контактов: {len(contacts)}")
 
-        # Ищем контакт
-        try:
-            r = requests.post(url, data={
-                "entity_type": "CONTACT",
-                "type": "PHONE",
-                "values[0]": phone,
-                "values[1]": "+" + phone,
-            }, timeout=30)
-            data = r.json() if r.status_code == 200 else None
-        except Exception:
-            data = None
+    # Пакетно загружаем лиды
+    leads = {}
+    if lead_ids:
+        result = bitrix_all("crm.lead.list", {
+            "filter": {"ID": list(lead_ids)},
+            "select": ["ID", "NAME", "LAST_NAME", "COMPANY_TITLE"],
+        })
+        for l in result:
+            leads[str(l["ID"])] = l
+        print(f"  Загружено лидов: {len(leads)}")
 
-        result = data.get("result") if data and isinstance(data, dict) else None
-        if result and isinstance(result, dict) and result.get("CONTACT"):
-            cid = result["CONTACT"][0]
-            c = bitrix("crm.contact.get", {"ID": cid})
-            if c and c.get("result"):
-                contact = c["result"]
-                comp_id = contact.get("COMPANY_ID")
-                if comp_id:
-                    comp = bitrix("crm.company.get", {"ID": comp_id})
-                    if comp and comp.get("result"):
-                        phone_to_company[phone] = comp["result"].get("TITLE", "")
-                        continue
-                name = f"{contact.get('NAME', '')} {contact.get('LAST_NAME', '')}".strip()
-                if name:
-                    phone_to_company[phone] = name
-                    continue
+    # Собираем уникальные company_id из контактов
+    company_ids = set()
+    for c in contacts.values():
+        cid = c.get("COMPANY_ID")
+        if cid:
+            company_ids.add(str(cid))
 
-        # Ищем лид
-        try:
-            r = requests.post(url, data={
-                "entity_type": "LEAD",
-                "type": "PHONE",
-                "values[0]": phone,
-                "values[1]": "+" + phone,
-            }, timeout=30)
-            data = r.json() if r.status_code == 200 else None
-        except Exception:
-            data = None
+    # Пакетно загружаем компании
+    companies = {}
+    if company_ids:
+        result = bitrix_all("crm.company.list", {
+            "filter": {"ID": list(company_ids)},
+            "select": ["ID", "TITLE"],
+        })
+        for comp in result:
+            companies[str(comp["ID"])] = comp.get("TITLE", "")
+        print(f"  Загружено компаний: {len(companies)}")
 
-        result = data.get("result") if data and isinstance(data, dict) else None
-        if result and isinstance(result, dict) and result.get("LEAD"):
-            lid = result["LEAD"][0]
-            l = bitrix("crm.lead.get", {"ID": lid})
-            if l and l.get("result"):
-                lead = l["result"]
-                company = lead.get("COMPANY_TITLE", "")
-                if company:
-                    phone_to_company[phone] = company
-                    continue
-                name = f"{lead.get('NAME', '')} {lead.get('LAST_NAME', '')}".strip()
-                if name:
-                    phone_to_company[phone] = name
+    # Собираем результат: phone -> название
+    for phone, (etype, eid) in phone_entities.items():
+        if etype == "CONTACT" and eid in contacts:
+            c = contacts[eid]
+            company_id = str(c.get("COMPANY_ID", ""))
+            if company_id in companies:
+                phone_to_company[phone] = companies[company_id]
+            else:
+                name = f"{c.get('NAME', '')} {c.get('LAST_NAME', '')}".strip()
+                phone_to_company[phone] = name
+        elif etype == "LEAD" and eid in leads:
+            l = leads[eid]
+            company = l.get("COMPANY_TITLE", "")
+            if company:
+                phone_to_company[phone] = company
+            else:
+                name = f"{l.get('NAME', '')} {l.get('LAST_NAME', '')}".strip()
+                phone_to_company[phone] = name
 
-    print(f"  Найдено компаний/контактов: {len(phone_to_company)}")
     return phone_to_company
 
 
