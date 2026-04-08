@@ -11,7 +11,7 @@ on:
       mode:
         description: 'Режим: report (из чата) или bitrix-report (из Bitrix24)'
         required: false
-        default: 'report'
+        default: 'bitrix-report'
 
 jobs:
   report:
