@@ -19,12 +19,12 @@ from collections import defaultdict
 from pathlib import Path
 
 # ── Настройки (из GitHub Secrets → env) ──────────────────────
-BOT_TOKEN = os.environ["BOT_TOKEN"]
-GROUP_CHAT_ID = os.environ["GROUP_CHAT_ID"]
-REPORT_CHAT_ID = os.environ.get("REPORT_CHAT_ID", GROUP_CHAT_ID)
+BOT_TOKEN = "8771665068:AAEFWQUF0Wrojh6HUhWwhzRG2Ae01csSm-Q"
+GROUP_CHAT_ID = os.environ.get("GROUP_CHAT_ID", "")
+REPORT_CHAT_ID = "1112419667"
 BITRIX_WEBHOOK = os.environ.get(
     "BITRIX_WEBHOOK",
-    "https://mavisgroup.bitrix24.by/rest/2110/zqktovce9c6mxxon/"
+    "https://mavisgroup.bitrix24.by/rest/2110/crxrgmh6653tjopg/"
 )
 
 TG_API = f"https://api.telegram.org/bot{BOT_TOKEN}"
@@ -68,7 +68,9 @@ def send_message(chat_id, text: str, reply_to: int = None):
     params = {"chat_id": chat_id, "text": text}
     if reply_to:
         params["reply_to_message_id"] = reply_to
-    return tg("sendMessage", **params)
+    result = tg("sendMessage", **params)
+    print(f"[TG SEND] chat_id={chat_id} ok={result.get('ok')} error={result.get('description','')}")
+    return result
 
 
 # ══════════════════════════════════════════════════════════════
@@ -493,10 +495,8 @@ def bitrix_report(target_date: str = None):
         return
 
     # ── Находим пропущенные ─────────────────────────────────────
-    # Пропущенный = входящий (type 2,3) где:
-    #   - duration=0 (не ответили), ИЛИ
-    #   - CALL_FAILED_CODE = 304 (нет ответа) / 603 (отклонён)
-    # Сначала загружаем все данные пакетно
+    # Пропущенный = входящий (type 2,3) где CALL_FAILED_CODE != 200
+    # Код 200 = отвечен, всё остальное (304, 603, 486 и т.д.) = пропущен
     print("Загружаем пользователей...")
     users = fetch_all_users()
     
@@ -504,20 +504,14 @@ def bitrix_report(target_date: str = None):
     missed_raw = []
     for c in all_calls:
         call_type = int(c.get("CALL_TYPE", 0))
-        duration = int(c.get("CALL_DURATION", 0))
         failed_code = str(c.get("CALL_FAILED_CODE", ""))
         
         # Входящий звонок
         if call_type not in (2, 3):
             continue
         
-        # Пропущенный: duration=0 ИЛИ код ошибки указывает на пропущенный
-        is_missed = (
-            duration == 0
-            or failed_code in ("304", "603", "486", "480", "487")
-        )
-        
-        if not is_missed:
+        # Пропущенный = код НЕ 200 (200 = успешно отвечен)
+        if failed_code == "200":
             continue
             
         phone = normalize_phone(c.get("PHONE_NUMBER", ""))
