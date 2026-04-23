@@ -79,13 +79,18 @@ def send_message(chat_id, text: str, reply_to: int = None):
 
 def bitrix(method: str, params: dict = None) -> dict | None:
     url = BITRIX_WEBHOOK.rstrip("/") + "/" + method
-    try:
-        r = requests.get(url, params=params or {}, timeout=30)
-        r.raise_for_status()
-        return r.json()
-    except Exception as e:
-        print(f"[BITRIX ERROR] {method}: {e}")
-        return None
+    for attempt in range(3):
+        try:
+            r = requests.post(url, json=params or {}, timeout=120)
+            r.raise_for_status()
+            return r.json()
+        except Exception as e:
+            if attempt < 2:
+                print(f"[BITRIX RETRY] {method} attempt {attempt+1}: {e}")
+                import time; time.sleep(2)
+            else:
+                print(f"[BITRIX ERROR] {method}: {e}")
+    return None
 
 
 def bitrix_all(method: str, params: dict = None) -> list:
@@ -95,7 +100,14 @@ def bitrix_all(method: str, params: dict = None) -> list:
     start = 0
     while True:
         params["start"] = start
-        data = bitrix(method, params)
+        url = BITRIX_WEBHOOK.rstrip("/") + "/" + method
+        try:
+            r = requests.post(url, json=params, timeout=120)
+            r.raise_for_status()
+            data = r.json()
+        except Exception as e:
+            print(f"[BITRIX ERROR] {method}: {e}")
+            break
         if not data or "result" not in data:
             break
         items = data["result"]
@@ -124,8 +136,10 @@ def get_bitrix_calls(date_str: str) -> list:
     d = datetime.strptime(date_str, "%Y-%m-%d")
     d_next = d + timedelta(days=1)
     params = {
-        "FILTER[>CALL_START_DATE]": d.strftime("%Y-%m-%dT00:00:00"),
-        "FILTER[<CALL_START_DATE]": d_next.strftime("%Y-%m-%dT00:00:00"),
+        "FILTER": {
+            ">CALL_START_DATE": d.strftime("%Y-%m-%dT00:00:00"),
+            "<CALL_START_DATE": d_next.strftime("%Y-%m-%dT00:00:00"),
+        },
         "SORT": "CALL_START_DATE",
         "ORDER": "ASC",
     }
@@ -695,20 +709,26 @@ def fetch_companies_for_calls(missed_calls: list, all_calls: list) -> dict:
     """
     Находит компании/контакты для пропущенных номеров.
     Использует CRM_ENTITY_TYPE/CRM_ENTITY_ID из данных звонков.
-    Возвращает {phone: 'Название компании или ФИО'}.
     """
     phone_to_company = {}
 
-    # Собираем CRM-привязки из ВСЕХ звонков (не только пропущенных)
-    phone_entities = {}  # phone -> (entity_type, entity_id)
+    # Собираем уникальные номера из пропущенных
+    missed_phones = set(m.get("phone", "") for m in missed_calls if m.get("phone"))
+
+    # Собираем CRM-привязки только для пропущенных номеров
+    phone_entities = {}
     for c in all_calls:
         phone = normalize_phone(c.get("PHONE_NUMBER", ""))
+        if phone not in missed_phones or phone in phone_entities:
+            continue
         entity_type = c.get("CRM_ENTITY_TYPE", "")
         entity_id = c.get("CRM_ENTITY_ID", "")
-        if phone and entity_type and entity_id and phone not in phone_entities:
+        if entity_type and entity_id:
             phone_entities[phone] = (entity_type, entity_id)
 
-    # Собираем уникальные ID контактов и лидов
+    print(f"  CRM-привязок для пропущенных: {len(phone_entities)}")
+
+    # Собираем уникальные ID
     contact_ids = set()
     lead_ids = set()
     for phone, (etype, eid) in phone_entities.items():
@@ -720,23 +740,19 @@ def fetch_companies_for_calls(missed_calls: list, all_calls: list) -> dict:
     # Пакетно загружаем контакты
     contacts = {}
     if contact_ids:
-        result = bitrix_all("crm.contact.list", {
-            "filter": {"ID": list(contact_ids)},
-            "select": ["ID", "NAME", "LAST_NAME", "COMPANY_ID"],
-        })
-        for c in result:
-            contacts[str(c["ID"])] = c
+        for cid in contact_ids:
+            c = bitrix("crm.contact.get", {"ID": cid})
+            if c and c.get("result"):
+                contacts[str(cid)] = c["result"]
         print(f"  Загружено контактов: {len(contacts)}")
 
     # Пакетно загружаем лиды
     leads = {}
     if lead_ids:
-        result = bitrix_all("crm.lead.list", {
-            "filter": {"ID": list(lead_ids)},
-            "select": ["ID", "NAME", "LAST_NAME", "COMPANY_TITLE"],
-        })
-        for l in result:
-            leads[str(l["ID"])] = l
+        for lid in lead_ids:
+            l = bitrix("crm.lead.get", {"ID": lid})
+            if l and l.get("result"):
+                leads[str(lid)] = l["result"]
         print(f"  Загружено лидов: {len(leads)}")
 
     # Собираем уникальные company_id из контактов
@@ -749,12 +765,10 @@ def fetch_companies_for_calls(missed_calls: list, all_calls: list) -> dict:
     # Пакетно загружаем компании
     companies = {}
     if company_ids:
-        result = bitrix_all("crm.company.list", {
-            "filter": {"ID": list(company_ids)},
-            "select": ["ID", "TITLE"],
-        })
-        for comp in result:
-            companies[str(comp["ID"])] = comp.get("TITLE", "")
+        for comp_id in company_ids:
+            comp = bitrix("crm.company.get", {"ID": comp_id})
+            if comp and comp.get("result"):
+                companies[str(comp_id)] = comp["result"].get("TITLE", "")
         print(f"  Загружено компаний: {len(companies)}")
 
     # Собираем результат: phone -> название
